@@ -16,4 +16,6 @@ dependencies = [
     "bcrypt==4.3.0",
     "pyjwt>=2.13.0",
     "aioredis>=2.0.1",
+    "redis>=8.1.0",
+    "fastapi-mail>=1.6.8",
 ]

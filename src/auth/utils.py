@@ -29,7 +29,7 @@ verified_signature 认证签名
 ACCESS_TOKEN_EXPIRE_MINUTES = 3600
 def create_access_token(user_data:dict, expires_delta:timedelta = None,refresh:bool = False):
     payload = {} #创建一个空字典用来放有效载荷
-    payload['user']=user_data
+    payload['user']=user_data #important:指定user键存储用户信息字典
     #tips:设置过期时间，等于从当前时间加上设定的过期时间，如果过期时间没有设置，那就永不过期[不推荐，所以应该换为默认过期时间1小时],
     # payload['exp']=datetime.now() + expires_delta if expires_delta else None
     payload['exp']=datetime.now() + (expires_delta if expires_delta else timedelta(seconds=ACCESS_TOKEN_EXPIRE_MINUTES))

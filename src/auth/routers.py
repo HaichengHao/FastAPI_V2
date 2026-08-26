@@ -1,20 +1,106 @@
 from datetime import datetime
-
+from src.errors import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Annotated
 from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.responses import JSONResponse
-
-from src.auth.schemas import UserSchema, UserCreatedSchema,UserLoginSchema,RespSchema
+from src.auth.schemas import UserCreatedSchema, UserLoginSchema, RespSchema, EmailSchema
 from src.db.main import get_session
 from src.auth.service import user_service
-from src.auth.dependencies import access_token_bearer,refresh_token_bearer
-
+from src.auth.dependencies import access_token_bearer, refresh_token_bearer, get_current_user, role_checker
 from src.auth.utils import create_access_token
 from src.db.redis import add_jti_to_blocklist
+from src.mail import create_message, mail_server
+from src.errors import InvalidCredentials
+
 auth_router = APIRouter(
     tags=['auth']
 )
+
+
+# tips:定义邮件发送路由
+@auth_router.post('/send_mail')
+async def send_mail(emails: EmailSchema):
+    emails = emails.email_address
+    mailbody = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>邮件通知</title>
+    </head>
+    <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f9;">
+        <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <tr>
+                <td align="center" style="background-color: #ffffff; border-radius: 12px; padding: 40px 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.08);">
+                    <!-- Logo/Header -->
+                    <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%">
+                        <tr>
+                            <td align="center" style="padding-bottom: 30px;">
+                                <div style="width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; display: inline-block; line-height: 60px; font-size: 28px; color: #ffffff; font-weight: bold;">📧</div>
+                                <h1 style="color: #1a1a2e; font-size: 24px; margin: 20px 0 0 0; font-weight: 600;">NIKOFOX 邮件通知</h1>
+                            </td>
+                        </tr>
+                        
+                        <!-- 分隔线 -->
+                        <tr>
+                            <td align="center" style="padding-bottom: 30px;">
+                                <div style="width: 80px; height: 3px; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); border-radius: 2px;"></div>
+                            </td>
+                        </tr>
+                        
+                        <!-- 正文内容 -->
+                        <tr>
+                            <td style="padding-bottom: 30px;">
+                                <p style="color: #2d3748; font-size: 16px; line-height: 1.8; margin: 0 0 20px 0;">
+                                    您好！
+                                </p>
+                                <p style="color: #2d3748; font-size: 16px; line-height: 1.8; margin: 0 0 20px 0;">
+                                    这是一封来自 <strong style="color: #667eea;">FastAPI V2</strong> 的测试邮件。
+                                </p>
+                                <div style="background: #f7fafc; border-left: 4px solid #667eea; padding: 16px 20px; border-radius: 4px; margin: 20px 0;">
+                                    <p style="color: #2d3748; font-size: 15px; line-height: 1.6; margin: 0;">
+                                        📌 这是一条测试消息，如果您收到此邮件，说明邮件服务配置成功！
+                                    </p>
+                                </div>
+                            </td>
+                        </tr>
+                        
+                        <!-- 按钮 -->
+                        <tr>
+                            <td align="center" style="padding-bottom: 30px;">
+                                <a href="#" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 12px 32px; border-radius: 8px; font-size: 16px; font-weight: 500; transition: all 0.3s ease;">
+                                    查看详情 →
+                                </a>
+                            </td>
+                        </tr>
+                        
+                        <!-- 底部信息 -->
+                        <tr>
+                            <td align="center" style="border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                                <p style="color: #718096; font-size: 13px; line-height: 1.6; margin: 0;">
+                                    此邮件由 NIKOFOX FastAPI V2 系统自动发送<br>
+                                    请勿回复此邮件
+                                </p>
+                                <p style="color: #a0aec0; font-size: 12px; margin: 10px 0 0 0;">
+                                    © 2026 NIKOFOX. All rights reserved.
+                                </p>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    """
+
+    message = create_message(recipient_list=emails, subject='test mail', body=mailbody)
+    await mail_server.send_message(message)
+    return {
+        'message': 'success send mail',
+    }
 
 
 # tips:定义注册路由
@@ -29,23 +115,24 @@ async def create_user_Account(
     if result:  # TIPS:如果结果不为空，说明用户已经存在了
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
     else:
-        new_user =  await user_service.create_user(user_data, session=session)
+        new_user = await user_service.create_user(user_data, session=session)
         return new_user
 
-#tips:定义jwt认证路由
+
+# tips:定义jwt认证路由
 @auth_router.post('/login')
-async def login_user(login_data: UserLoginSchema,session: Annotated[AsyncSession, Depends(get_session)]):
+async def login_user(login_data: UserLoginSchema, session: Annotated[AsyncSession, Depends(get_session)]):
     result = await user_service.login_service(login_data, session=session)
     return result
 
 
 @auth_router.post('/refresh_token')
-async def refresh_token(token_details:Annotated[dict,Depends(refresh_token_bearer)]):
-    expiry_timestamp=token_details['exp'] #tips:拿到解码token_data中的payload['exp']
+async def refresh_token(token_details: Annotated[dict, Depends(refresh_token_bearer)]):
+    expiry_timestamp = token_details['exp']  # tips:拿到解码token_data中的payload['exp']
     print(expiry_timestamp)
-    #important:利用fromtimestamp将时间戳转换为日期时间对象
-    if datetime.fromtimestamp(expiry_timestamp) > datetime.now(): #tips:如果过期时间大于当前时间,那么就创建一个新的访问令牌
-        new_access_token=create_access_token(
+    # important:利用fromtimestamp将时间戳转换为日期时间对象
+    if datetime.fromtimestamp(expiry_timestamp) > datetime.now():  # tips:如果过期时间大于当前时间,那么就创建一个新的访问令牌
+        new_access_token = create_access_token(
             user_data=token_details['user'],
         )
         return JSONResponse(
@@ -54,19 +141,31 @@ async def refresh_token(token_details:Annotated[dict,Depends(refresh_token_beare
             }
         )
 
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Invalid or Expired token")
+    # raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or Expired token")
+    raise InvalidToken()
 
 
+# ----------基于用户身份进行鉴权分块代码----------------#
+
+# tips:获取当前用户
+@auth_router.get('/me', response_model=RespSchema)
+async def get_now_user(user: Annotated[dict, Depends(get_current_user)],
+                       _: Annotated[bool, Depends(role_checker)]):  # important:使用占位符号,表示不关心变量,而是必须执行依赖项目,检查角色
+    # async def get_now_user(user=Depends(get_current_user),_:bool=Depends(role_checker)):
+    return user
+
+
+# ----------基于用户身份进行鉴权分块代码----------------#
 @auth_router.get('/logout')
-async def revoke_token(token_details:Annotated[dict,Depends(access_token_bearer)]):
-    jti=token_details['jti']
+async def revoke_token(token_details: Annotated[dict, Depends(access_token_bearer)]):
+    jti = token_details['jti']
 
-    #tips:拿到了jti之后把它加在阻止列表中
+    # tips:拿到了jti之后把它加在阻止列表中
     await add_jti_to_blocklist(jti)
 
     return JSONResponse(
         content={
-            "message": "Logged out successfully",#tips:返回成功注销
+            "message": "Logged out successfully",  # tips:返回成功注销
         },
         status_code=status.HTTP_200_OK
     )

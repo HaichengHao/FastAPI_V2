@@ -1,7 +1,7 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, List
 import uuid
-
+from src.reviews.schemas import ReviewSchema
 from pydantic import BaseModel
 
 
@@ -33,3 +33,6 @@ class BookUpdateSchema(BaseModel):
     published_date: Optional[date] = None
     page_count: Optional[int] = None
     language: Optional[str] = None
+
+class BookDetailSchema(BookSchema):
+    reviews: List[ReviewSchema]

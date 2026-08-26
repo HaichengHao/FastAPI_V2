@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlmodel import desc, select
 
 from src.books.models import Book
@@ -11,16 +12,16 @@ from src.db.main import get_session
 
 class BookService:
     async def get_all_books(self, session: Annotated[AsyncSession, Depends(get_session)]):
-        statement = select(Book).order_by(desc(Book.published_date))
+        statement = select(Book).options(selectinload(Book.reviews)).order_by(desc(Book.published_date)) #important:解决懒加载导致的问题
         result = await session.execute(statement)
         return result.scalars().all() #tips:用scalars来拿到数据行
 
     async def get_a_book(self, book_uid: str, session: Annotated[AsyncSession, Depends(get_session)]):
-        statement = select(Book).where(Book.uid == book_uid)
+        statement = select(Book).options(selectinload(Book.reviews)).where(Book.uid == book_uid)
         result = await session.execute(statement)
         return result.scalar_one_or_none() #tips:用scalar_one_or_none()来检验数据库中是否真的有图书
 
-    async def create_books(self, book_data: BookCreateSchema, session: Annotated[AsyncSession, Depends(get_session)]):
+    async def create_books(self, book_data: BookCreateSchema,user_uid:str, session: Annotated[AsyncSession, Depends(get_session)]):
         statement = select(Book).where(Book.title == book_data.title)
         result = await session.execute(statement)
         book_exist = result.scalar_one_or_none()
@@ -28,6 +29,7 @@ class BookService:
             return None
 
         new_book = Book(**book_data.model_dump())
+        new_book.user_uid=user_uid
         session.add(new_book)
         await session.commit()
         await session.refresh(new_book) #important:提交之后要记得刷新
@@ -66,5 +68,12 @@ class BookService:
             "book_uid": book_uid,
         }
 
+    #tips:写一个新的服务,通过外键user_uid获取图书
+    async def get_user_books(self,user_uid:str, session: Annotated[AsyncSession, Depends(get_session)]):
+        statement = select(Book).where(Book.user_uid == user_uid).order_by(desc(Book.published_date))
+        result = await session.execute(statement)
+        return result.scalars().all()
+
+    #tips:写一个服务,通过输入图书即可知道该图书是谁发布的
 
 bk_service = BookService()

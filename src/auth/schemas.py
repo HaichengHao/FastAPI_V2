@@ -3,8 +3,7 @@ from typing import Optional,Annotated
 import uuid
 import re
 from pydantic import BaseModel,Field,field_validator
-from dataclasses import dataclass
-
+from src.books.models import Book
 class PublicUserSchema(BaseModel):
     username:Annotated[str,Field(max_length=8)]
     first_name: str=Field(max_length=25)
@@ -33,10 +32,17 @@ class UserCreatedSchema(PublicUserSchema):
     password: Annotated[str, Field(description="最低6字符", min_length=6)]
 
 class RespSchema(PublicUserSchema):
-    pass
+    books:list[Book]
 
 #tips:定义用户登录schema
 
 class UserLoginSchema(BaseModel):
     email:str
     password:str
+
+
+#tips:创建邮件发送路由要用到的Schema
+
+class EmailSchema(BaseModel):
+    email_address:list[str]
+

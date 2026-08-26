@@ -1,6 +1,6 @@
 from datetime import timedelta
 from typing import Annotated
-
+from src.errors import UserNotFound,InvalidCredentials
 from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
 from starlette import status
@@ -26,6 +26,8 @@ class UserService:
             )
             #tips:数据库中存储的是加密后的密码，是密文
             new_user.password_hash=generate_password_hash(user_data_dict['password'])
+            #tips:为用户提供默认角色
+            new_user.role="user"
             session.add(new_user)
             await session.commit()
             await session.refresh(new_user)
@@ -76,6 +78,7 @@ class UserService:
                     user_data={
                         'email': user.email,
                         'user_uid':str(user.uid),
+                        'role':user.role
                     },
 
                 )
@@ -102,15 +105,17 @@ class UserService:
                     }
                 )
             else:
-                return {
-                    'message': '密码有误，请检查后重新输入',
-                    'email': user.email, #tips:传入这个是方便前端处理的时候不用再输一遍邮箱了
-                }
+                # return {
+                #     'message': '密码有误，请检查后重新输入',
+                #     'email': user.email, #tips:传入这个是方便前端处理的时候不用再输一遍邮箱了
+                # }
+                raise InvalidCredentials()
         else:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="该用户不存在，请先创建"
-            )
+            # raise HTTPException(
+            #     status_code=status.HTTP_403_FORBIDDEN,
+            #     detail="该用户不存在，请先创建"
+            # )
+            raise UserNotFound()
 
 user_service = UserService()
 
