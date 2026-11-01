@@ -61,15 +61,32 @@ class UserService:
         if user_exist:
             for field, value in update_data.model_dump(exclude_unset=True).items():
                 setattr(user_exist, field, value)
+            # 提交数据库事务
+            await session.commit()
+
+            # 刷新ORM对象，获取数据库最新数据
+            await session.refresh(user_exist)
+
+            return user_exist
+
+        else:
+            raise UserNotFound()
 
 
     # #定义更新用户，这里和邮件认证服务有关的！原来上面已经写过了
-    async def update_user(self,user:UserSchema,user_data:dict,session:Annotated[AsyncSession,Depends(get_session())]):
+    async def update_user(self,user:UserSchema,user_data:dict,session:Annotated[AsyncSession,Depends(get_session)]):
         user_exist = await self.get_user_by_email(user.email, session)
         if user_exist:
             for k,v in user_data.items():
                 setattr(user_exist, k, v)
-                return user_exist
+            # 提交数据库事务
+            await session.commit()
+
+            # 刷新ORM对象，获取数据库最新数据
+            await session.refresh(user_exist)
+
+            return user_exist
+
         else:
             raise UserNotFound()
 

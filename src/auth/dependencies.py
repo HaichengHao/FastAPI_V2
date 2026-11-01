@@ -9,7 +9,7 @@ from src.db.redis import token_in_blocklist  # tips:新增用于添加阻塞列�
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.auth.service import user_service
 from src.auth.model import User
-from src.errors import InvalidCredentials,InvalidToken,AccessTokenRequired,RefreshTokenRequired,InsufficientPermission
+from src.errors import InvalidCredentials,AccountNotVerified,InvalidToken,AccessTokenRequired,RefreshTokenRequired,InsufficientPermission
 
 # important:HTTPBearer允许我们保护一个端点,并使其仅在有人以持有者加令牌的形式提供其令牌时才能被访问
 
@@ -123,6 +123,10 @@ class RoleChecker:
         self.allowed_roles = allowed_roles
 
     def __call__(self,current_user:Annotated[User,Depends(get_current_user)])->Any:
+        #tips:新增检查,查看用户的数据中is_verified是否为true
+        if not current_user.is_verified:
+            raise AccountNotVerified()
+
         if current_user.role in self.allowed_roles:
             return True
         # raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="YOU ARE NOT ALLOW TO PERFORM THIS ACTION")

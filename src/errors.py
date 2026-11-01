@@ -47,6 +47,11 @@ class BookAlreadyExists(BooklyException):
     """Book already exists exception"""
     pass
 
+#tips:创建未验证异常
+class AccountNotVerified(BooklyException):
+    """Account not verified exception"""
+    pass
+
 
 async def create_exception_handler(status_code:int,initial_detail:Any) -> Callable[[Request,Exception],JSONResponse]:
     async def exception_handler(request:Request,exc:BooklyException):
@@ -183,4 +188,16 @@ def register_all_errors(app:FastAPI):
             }
         )
 
+    )
+    #添加账户未验证异常
+    app.add_exception_handler(
+        AccountNotVerified,
+        handler=create_exception_handler(
+            status_code=status.HTTP_403_FORBIDDEN,
+            initial_detail={
+                'message': 'Account not verified.',
+                'error_code': 'account_not_verified',
+                'resolution': 'Please check your email for verification details.'
+            }
+        )
     )

@@ -2381,8 +2381,12 @@ async def send_mail(emails: EmailSchema):
 
 - auth/utils.py
 ```python
+from itsdangerous import URLSafeTimedSerializer
+
+# 利用itsdangerous设置令牌，将用户信息进行令牌生成
+
 serializer = URLSafeTimedSerializer(
-        secret_key=project_settings.SECRET_KEY,
+        secret_key=project_settings.JWT_SECRET_KEY,
         salt="emial-configuration" #tips:加盐,可以自己决定，不要太简单，也可以生成一串hash
     )
 def create_url_safe_token(data:dict):
@@ -2403,3 +2407,300 @@ def decode_url_safe_token(token:str):
     except Exception as e:
         logger.exception(e)
 ```
+
+- auth/service.py
+
+```python
+    # #定义更新用户，这里和邮件认证服务有关的！原来上面已经写过了
+    async def update_user(self,user:UserSchema,user_data:dict,session:Annotated[AsyncSession,Depends(get_session)]):
+        user_exist = await self.get_user_by_email(user.email, session)
+        if user_exist:
+            for k,v in user_data.items():
+                setattr(user_exist, k, v)
+            # 提交数据库事务
+            await session.commit()
+
+            # 刷新ORM对象，获取数据库最新数据
+            await session.refresh(user_exist)
+
+            return user_exist
+            
+        else:
+            raise UserNotFound()
+```
+
+- auth/routers.py
+
+  
+
+  signup路由也需要改造,定义注册逻辑链，并使用之前构造好的mail_server来发送验证邮箱如果用户收到验证邮箱的邮件后，点击链接，就会建立起get请求直接跳转到验证链接，这时候就操作更新服务来将用户的标签位`is_verified`修改为True,表示用户认证成功!
+
+```python
+# tips:定义注册路由
+@auth_router.post('/signup', status_code=status.HTTP_201_CREATED)  # 由于做了邮件改造，所以这里不再返回new_user,自然不能用RespSchema了,不然是会报错的
+async def create_user_Account(
+        user_data: UserCreatedSchema,
+        session: Annotated[AsyncSession, Depends(get_session)],
+        request: Request,
+):
+    email = user_data.email
+    # tips:先查一下看看该用户有没有被注册
+    result = await user_service.get_user_by_email(email, session=session)
+    if result:  # TIPS:如果结果不为空，说明用户已经存在了
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
+    else:  # 如果不为空那就开始注册逻辑链
+        # 调用创建服务创建用户
+        new_user = await user_service.create_user(user_data, session=session)
+
+        # 生成safetoken
+        token = create_url_safe_token(
+            {
+                'email': email,
+
+            }
+        )
+        # ---------
+        # 改造,引入通过电子邮件验证用户账户
+        # link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/verify/{token}"
+        link = str(request.url_for('verify_user_account', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
+        html_msg = f"""
+        <html>
+            <body>
+                <h1>验证你的电子邮件</h1>
+                <p>点此<a href="{link}">链接</a>验证你的邮箱</a></p>
+            </body>
+        </html>
+        """
+        # 构建信息，发送给用户
+        message = create_message(
+            bcc_list=[email],
+            subject="Verify your Email",
+            body=html_msg
+
+        )
+
+        await mail_server.send_message(message)
+
+        return {
+            "message": "Account created successfully! Check email verify your count",
+            "user": new_user
+        }
+        # ---------
+
+        # return new_user
+
+
+# 创建MPI端点,实现邮箱认证服务
+@auth_router.get('/verify/{token}')
+async def verify_user_account(token: str, session: Annotated[AsyncSession, Depends(get_session)]):
+    # tips:解码收到的token
+    token_data =  decode_url_safe_token(token)
+
+    user_email = token_data.get('email')
+    if user_email:
+        user = await user_service.get_user_by_email(user_email, session=session)
+        if not user:
+            raise UserNotFound()
+        # 如果用户存在，那就调用service来更新用户的信息
+        await user_service.update_user(user, {'is_verified': True}, session=session)
+
+        return JSONResponse(
+            content={
+                "message": "Account verified successfully!!"
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    return JSONResponse(
+        content={
+            "message": "Something went wrong :("
+        },
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    )
+
+
+
+
+```
+
+
+
+
+
+### 流程截图
+
+![](./imgs/img_2.png)
+
+![](./imgs/img_3.png)
+
+![](./imgs/img_4.png)
+
+![](./imgs/img_1.png)
+
+然后查看`is_verified`是不是真的变成true了
+
+![](./imgs/img_5.png)
+
+这样就行了!
+
+
+
+
+
+
+
+
+
+## 密码重置服务
+
+用户需要提供一个邮件地址，取决于链接中是否包含用户的详细信息
+
+- auth/dependencies.py
+
+修改rolechecker的用户验证逻辑,之前我们实现了is_verified默认字段  为false且上面邮件认证服务中设置了is_verified的值的更新路由,那么  接下来就给它串起来,rolechecker要做的加上了检查is_verified是否为  true!!也就是说用户光注册是不行的，还需要点击自己的邮箱链接完成  注册逻辑  
+
+```python
+# tips:定义角色检查器
+class RoleChecker:
+
+    # ----------基于用户身份进行鉴权分块代码----------------#
+    def __init__(self, allowed_roles: list[str]) -> None:
+        self.allowed_roles = allowed_roles
+
+    def __call__(self,current_user:Annotated[User,Depends(get_current_user)])->Any:
+        #tips:新增检查,查看用户的数据中is_verified是否为true
+        if not current_user.is_verified:
+            raise AccountNotVerified()
+
+        if current_user.role in self.allowed_roles:
+            return True
+        # raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="YOU ARE NOT ALLOW TO PERFORM THIS ACTION")
+        raise InsufficientPermission()
+
+#tips:实例化角色检查器
+role_checker = RoleChecker(
+    ['user','admin']
+)
+
+```
+
+- errors.py  
+
+新增未验证异常，也就是说用户只是单纯注册的话是无法登录的，因为设置了rolechecker的is_verified检查
+
+```python
+#tips:创建未验证异常
+class AccountNotVerified(BooklyException):
+    """Account not verified exception"""
+    pass
+
+#添加账户未验证异常
+app.add_exception_handler(
+    AccountNotVerified,
+    handler=create_exception_handler(
+        status_code=status.HTTP_403_FORBIDDEN,
+        initial_detail={
+            'message': 'Account not verified.',
+            'error_code': 'account_not_verified',
+            'resolution': 'Please check your email for verification details.'
+        }
+    )
+)
+
+```
+
+
+
+---
+
+密码重置的三个步骤
+
+```
+1.获取用户的邮箱地址 ->密码重置请求,需要让ta们发送邮箱
+2.发送密码重置连接
+3.通过post请求提供信息，来重置密码 -> 密码重置确认
+```
+
+下面新增服务,实现密码重置服务
+
+- auth/routers.py
+
+```python
+@auth_router.post('/pwd-rest-request')
+async def pwd_rest(email_data: PasswordResetSchema, session: Annotated[AsyncSession, Depends(get_session)],request:Request):
+    email = email_data.email
+    # tips:先查一下看看该用户有没有被注册
+    result = await user_service.get_user_by_email(email, session=session)
+    if result:  # TIPS:如果结果不为空，说明用户已经存在了
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
+    else:
+        new_user = await user_service.create_user(email_data, session=session)
+
+        # 生成safetoken
+        token = create_url_safe_token(
+            {
+                'email': email,
+
+            }
+        )
+        # ---------
+        # 改造,引入密码重置认证，对应路由在下方实现
+        # link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/pwd_reset_confirm/{token}"
+        link = str(request.url_for('pwd_reset_confirm', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
+
+        html_msg = f"""
+           <html>
+               <body>
+                   <h1>重置您的密码</h1>
+                   <p>点此<a href="{link}">链接</a>重置密码</a></p>
+               </body>
+           </html>
+           """
+        # 构建信息，发送给用户
+        message = create_message(
+            bcc_list=[email],
+            subject="Verify your Email",
+            body=html_msg
+
+        )
+
+        await mail_server.send_message(message)
+
+        return JSONResponse(
+            content={
+                "message": "Account created successfully! Check email verify your count",
+                "user": new_user
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+# 实现密码重置确认的路由
+
+@auth_router.post('/pwd_rest_confirm/{token}')
+async def pwd_reset(token: str, pwd_data: PasswordConfirmSchema,
+                    session: Annotated[AsyncSession, Depends(get_session)]):
+    if pwd_data.new_pwd != pwd_data.confirm_new_pwd:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password not match")
+    token_data = decode_url_safe_token(token)
+    user_email = token_data.get('email')
+    if  user_email:
+        user = await user_service.get_user_by_email(user_email, session=session)
+        if not user:
+            raise UserNotFound()
+        pwd_hashed = generate_password_hash(pwd_data.confirm_new_pwd)
+        user_service.update_user(user, user_data={'password_hash': pwd_hashed}, session=session)
+        return JSONResponse(
+            content={
+                "message": "Password reset successfully",
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    return JSONResponse(
+        content={
+            "message":"Error occured while trying to reset password",
+        },
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
+```
+

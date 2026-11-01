@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Annotated
 from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.responses import JSONResponse
-from src.auth.schemas import UserCreatedSchema, UserLoginSchema, RespSchema, EmailSchema
+from src.auth.schemas import UserCreatedSchema, PasswordConfirmSchema, UserLoginSchema, RespSchema, EmailSchema, \
+    PasswordResetSchema
 from src.db.main import get_session
 from src.auth.service import user_service
 from src.auth.dependencies import access_token_bearer, refresh_token_bearer, get_current_user, role_checker
@@ -13,7 +14,8 @@ from src.db.redis import add_jti_to_blocklist
 from src.mail import create_message, mail_server
 from src.errors import InvalidCredentials
 from src.config import project_settings
-
+from src.auth.utils import generate_password_hash
+from fastapi import Request
 auth_router = APIRouter(
     tags=['auth']
 )
@@ -110,6 +112,7 @@ async def send_mail(emails: EmailSchema):
 async def create_user_Account(
         user_data: UserCreatedSchema,
         session: Annotated[AsyncSession, Depends(get_session)],
+        request: Request,
 ):
     email = user_data.email
     # tips:先查一下看看该用户有没有被注册
@@ -129,7 +132,8 @@ async def create_user_Account(
         )
         # ---------
         # 改造,引入通过电子邮件验证用户账户
-        link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/verify/{token}"
+        # link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/verify/{token}"
+        link = str(request.url_for('verify_user_account', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
         html_msg = f"""
         <html>
             <body>
@@ -161,7 +165,7 @@ async def create_user_Account(
 @auth_router.get('/verify/{token}')
 async def verify_user_account(token: str, session: Annotated[AsyncSession, Depends(get_session)]):
     # tips:解码收到的token
-    token_data = await decode_url_safe_token(token)
+    token_data =  decode_url_safe_token(token)
 
     user_email = token_data.get('email')
     if user_email:
@@ -179,11 +183,12 @@ async def verify_user_account(token: str, session: Annotated[AsyncSession, Depen
         )
     return JSONResponse(
         content={
-            "message":"Something went wrong :("
+            "message": "Something went wrong :("
         },
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
 
     )
+
 
 # tips:定义jwt认证路由
 @auth_router.post('/login')
@@ -234,4 +239,92 @@ async def revoke_token(token_details: Annotated[dict, Depends(access_token_beare
             "message": "Logged out successfully",  # tips:返回成功注销
         },
         status_code=status.HTTP_200_OK
+    )
+
+
+# ---------------------密码重置---------------------
+
+"""
+1.获取用户的邮箱地址 ->密码重置请求,需要让ta们发送邮箱
+2.发送密码重置连接
+3.通过post请求提供信息，来重置密码 -> 密码重置确认
+
+"""
+
+
+@auth_router.post('/pwd-rest-request')
+async def pwd_rest(email_data: PasswordResetSchema, session: Annotated[AsyncSession, Depends(get_session)],request:Request):
+    email = email_data.email
+    # tips:先查一下看看该用户有没有被注册
+    result = await user_service.get_user_by_email(email, session=session)
+    if result:  # TIPS:如果结果不为空，说明用户已经存在了
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
+    else:
+        new_user = await user_service.create_user(email_data, session=session)
+
+        # 生成safetoken
+        token = create_url_safe_token(
+            {
+                'email': email,
+
+            }
+        )
+        # ---------
+        # 改造,引入密码重置认证，对应路由在下方实现
+        # link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/pwd_reset_confirm/{token}"
+        link = str(request.url_for('pwd_reset_confirm', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
+
+        html_msg = f"""
+           <html>
+               <body>
+                   <h1>重置您的密码</h1>
+                   <p>点此<a href="{link}">链接</a>重置密码</a></p>
+               </body>
+           </html>
+           """
+        # 构建信息，发送给用户
+        message = create_message(
+            bcc_list=[email],
+            subject="Verify your Email",
+            body=html_msg
+
+        )
+
+        await mail_server.send_message(message)
+
+        return JSONResponse(
+            content={
+                "message": "Account created successfully! Check email verify your count",
+                "user": new_user
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+# 实现密码重置确认的路由
+
+@auth_router.post('/pwd_rest_confirm/{token}')
+async def pwd_reset(token: str, pwd_data: PasswordConfirmSchema,
+                    session: Annotated[AsyncSession, Depends(get_session)]):
+    if pwd_data.new_pwd != pwd_data.confirm_new_pwd:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password not match")
+    token_data = decode_url_safe_token(token)
+    user_email = token_data.get('email')
+    if  user_email:
+        user = await user_service.get_user_by_email(user_email, session=session)
+        if not user:
+            raise UserNotFound()
+        pwd_hashed = generate_password_hash(pwd_data.confirm_new_pwd)
+        user_service.update_user(user, user_data={'password_hash': pwd_hashed}, session=session)
+        return JSONResponse(
+            content={
+                "message": "Password reset successfully",
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    return JSONResponse(
+        content={
+            "message":"Error occured while trying to reset password",
+        },
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
     )

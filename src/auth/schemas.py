@@ -46,3 +46,18 @@ class UserLoginSchema(BaseModel):
 class EmailSchema(BaseModel):
     email_address:list[str]
 
+
+# 密码重置服务
+class PasswordResetSchema(BaseModel):
+    email:str
+    @field_validator('email')
+    def validate_email(cls, value):
+        ptn = r'^[A-Za-z0-9_\-\.]+@(163\.com|qq.com|gmail.com)$'
+        if re.match(ptn, value):
+            return value
+        else:
+            return '邮箱格式有误,请检查'
+
+class PasswordConfirmSchema(BaseModel):
+    new_pwd:str
+    confirm_new_pwd:str

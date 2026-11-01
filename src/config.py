@@ -7,7 +7,7 @@ class MYSettings(BaseSettings):
     JWT_ALOGRITHM: str
     REDIS_HOST: str="localhost"
     REDIS_PORT: int=65522
-    DOMAIN_NAME:str="localhost:8088"
+    DOMAIN_NAME:str="127.0.0.1:8088"
     model_config = SettingsConfigDict(
         env_file='.env',
         extra='ignore'
