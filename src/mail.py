@@ -1,4 +1,4 @@
-from fastapi_mail import FastMail,ConnectionConfig,MessageSchema,MessageType
+from fastapi_mail import FastMail,ConnectionConfig,MessageSchema,MessageType,NameEmail
 from src.config import project_settings
 from pathlib import Path
 from fastapi import UploadFile
@@ -33,13 +33,17 @@ mail_server = FastMail(
 
 #step 3: 创建能返回MessageSchema的方法
 def create_message(
-        recipient_list: list[str], #tips:收件人列表
+        # recipient_list: list[str], #tips:收件人列表
+        bcc_list: list[str], #tips:收件人列表
         subject: str, #tips:邮件主题
         body: str, #tips:正文
         # attachments: UploadFile, #tips:附件
 ):
+    # 使用一个占位邮箱作为 recipients，防止报错
+    placeholder = ["yourmail@xx.com"]
     message = MessageSchema(
-        recipients=recipient_list,
+        recipients=placeholder,
+        bcc=bcc_list,
         subject=subject,
         body=body,
         # attachments=attachments

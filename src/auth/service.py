@@ -63,6 +63,16 @@ class UserService:
                 setattr(user_exist, field, value)
 
 
+    # #定义更新用户，这里和邮件认证服务有关的！原来上面已经写过了
+    async def update_user(self,user:UserSchema,user_data:dict,session:Annotated[AsyncSession,Depends(get_session())]):
+        user_exist = await self.get_user_by_email(user.email, session)
+        if user_exist:
+            for k,v in user_data.items():
+                setattr(user_exist, k, v)
+                return user_exist
+        else:
+            raise UserNotFound()
+
 
     #tips:定义登录校验服务
     async def login_service(self,login_data:UserLoginSchema,session:Annotated[AsyncSession,Depends(get_session)]):

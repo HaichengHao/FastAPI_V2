@@ -5,6 +5,7 @@ from passlib.context import CryptContext
 import uuid
 from src.config import project_settings
 from loguru import logger
+from itsdangerous import URLSafeTimedSerializer
 
 passwd_context = CryptContext(
     schemes=["bcrypt"]
@@ -60,3 +61,29 @@ def decode_token(token:str):
     except jwt.PyJWTError as e:
         logger.exception(e)
         return None
+
+
+
+# 利用itsdangerous设置令牌，将用户信息进行令牌生成
+
+serializer = URLSafeTimedSerializer(
+        secret_key=project_settings.JWT_SECRET_KEY,
+        salt="emial-configuration" #tips:加盐,可以自己决定，不要太简单，也可以生成一串hash
+    )
+def create_url_safe_token(data:dict):
+    # serializer = URLSafeTimedSerializer(
+    #     secret_key=project_settings.SECRET_KEY,
+    #     salt="emial-configuration" #tips:加盐,可以自己决定，不要太简单，也可以生成一串hash
+    # )
+
+    token = serializer.dumps(data) #tips:没错，它也可以加盐
+    #tips:dumps方法允许我们获取一个值,然后将其序列化为一个对象,或基本上是一个类似于令牌的字符串,就像我们创建的JWT一样
+    return token
+
+def decode_url_safe_token(token:str):
+    try:
+        token_data = serializer.loads(token) #tips:将返回解码后存储在我们令牌内的数据
+
+        return token_data
+    except Exception as e:
+        logger.exception(e)

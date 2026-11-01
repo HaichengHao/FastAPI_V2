@@ -1,5 +1,5 @@
 from datetime import datetime
-from src.errors import InvalidToken
+from src.errors import InvalidToken, UserNotFound
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Annotated
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -8,10 +8,11 @@ from src.auth.schemas import UserCreatedSchema, UserLoginSchema, RespSchema, Ema
 from src.db.main import get_session
 from src.auth.service import user_service
 from src.auth.dependencies import access_token_bearer, refresh_token_bearer, get_current_user, role_checker
-from src.auth.utils import create_access_token
+from src.auth.utils import create_access_token, create_url_safe_token, decode_url_safe_token
 from src.db.redis import add_jti_to_blocklist
 from src.mail import create_message, mail_server
 from src.errors import InvalidCredentials
+from src.config import project_settings
 
 auth_router = APIRouter(
     tags=['auth']
@@ -21,7 +22,7 @@ auth_router = APIRouter(
 # tips:定义邮件发送路由
 @auth_router.post('/send_mail')
 async def send_mail(emails: EmailSchema):
-    emails = emails.email_address
+    emails_addr = emails.email_address
     mailbody = """
     <!DOCTYPE html>
     <html>
@@ -96,7 +97,7 @@ async def send_mail(emails: EmailSchema):
     </html>
     """
 
-    message = create_message(recipient_list=emails, subject='test mail', body=mailbody)
+    message = create_message(bcc_list=emails_addr, subject='test mail', body=mailbody)
     await mail_server.send_message(message)
     return {
         'message': 'success send mail',
@@ -104,7 +105,8 @@ async def send_mail(emails: EmailSchema):
 
 
 # tips:定义注册路由
-@auth_router.post('/signup', response_model=RespSchema, status_code=status.HTTP_201_CREATED)
+# @auth_router.post('/signup', response_model=RespSchema, status_code=status.HTTP_201_CREATED)
+@auth_router.post('/signup', status_code=status.HTTP_201_CREATED)  # 由于做了邮件改造，所以这里不再返回new_user,自然不能用RespSchema了,不然是会报错的
 async def create_user_Account(
         user_data: UserCreatedSchema,
         session: Annotated[AsyncSession, Depends(get_session)],
@@ -114,10 +116,74 @@ async def create_user_Account(
     result = await user_service.get_user_by_email(email, session=session)
     if result:  # TIPS:如果结果不为空，说明用户已经存在了
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
-    else:
+    else:  # 如果不为空那就开始注册逻辑链
+        # 调用创建服务创建用户
         new_user = await user_service.create_user(user_data, session=session)
-        return new_user
 
+        # 生成safetoken
+        token = create_url_safe_token(
+            {
+                'email': email,
+
+            }
+        )
+        # ---------
+        # 改造,引入通过电子邮件验证用户账户
+        link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/verify/{token}"
+        html_msg = f"""
+        <html>
+            <body>
+                <h1>验证你的电子邮件</h1>
+                <p>点此<a href="{link}">链接</a>验证你的邮箱</a></p>
+            </body>
+        </html>
+        """
+        # 构建信息，发送给用户
+        message = create_message(
+            bcc_list=[email],
+            subject="Verify your Email",
+            body=html_msg
+
+        )
+
+        await mail_server.send_message(message)
+
+        return {
+            "message": "Account created successfully! Check email verify your count",
+            "user": new_user
+        }
+        # ---------
+
+        # return new_user
+
+
+# 创建MPI端点,实现邮箱认证服务
+@auth_router.get('/verify/{token}')
+async def verify_user_account(token: str, session: Annotated[AsyncSession, Depends(get_session)]):
+    # tips:解码收到的token
+    token_data = await decode_url_safe_token(token)
+
+    user_email = token_data.get('email')
+    if user_email:
+        user = await user_service.get_user_by_email(user_email, session=session)
+        if not user:
+            raise UserNotFound()
+        # 如果用户存在，那就调用service来更新用户的信息
+        await user_service.update_user(user, {'is_verified': True}, session=session)
+
+        return JSONResponse(
+            content={
+                "message": "Account verified successfully!!"
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    return JSONResponse(
+        content={
+            "message":"Something went wrong :("
+        },
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    )
 
 # tips:定义jwt认证路由
 @auth_router.post('/login')

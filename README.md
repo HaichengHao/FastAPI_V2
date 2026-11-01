@@ -123,7 +123,7 @@ target_metadata=[Book.metadata,User.metadata]
 from sqlmodel import SQLModel
 target_metadata=[SQLModel.metadata]
 ```
---- 
+---
 
 ### 或者，我们可以用新的玩法!!
 
@@ -786,7 +786,7 @@ async def get_now_user(user: Annotated[dict, Depends(get_current_user)],
 有了role_checker之后,可以在需要进行角色检查的路由上使用它作为依赖项,对角色进行检查,实现角色控制
 
 
------ 
+-----
 
 ### 模型(model)与模式(schema)关系
 
@@ -922,7 +922,7 @@ async def get_user_books_submissions(uid:str,
 ```
 ![](/imgs/sbsbooks.svg)
 
----  
+---
 
 但是这样的方式还不够完美,回想一下现在其实只是用了外键约束而已,还没有上关系(relationship)  
 回忆一下之前sqlalchemy那版fastapi学习路程,除了创建外键,也可以设置back_ref(flask)/back_populates(fastapi_sqlalchemy)
@@ -2211,7 +2211,12 @@ def create_message(
 #tips:创建邮件发送路由要用到的Schema
 
 class EmailSchema(BaseModel):
-    email_address:list[str]
+    email_address:list[str]  
+    
+    注意,前端要传入的话格式应该是
+    {
+        email_address:['xxxx@qq.com','xxxx@163.com']
+    }
 
 ```
 
@@ -2296,4 +2301,105 @@ USE_CREDENTIALS=True
 VALIDATE_CERTS=True
 ```
 
+![](./imgs/img.png)
+----
 
+
+
+## 高级服务之群发信息保护
+
+`fastapi-mail` 的设计逻辑比较巧妙：**`recipients` 字段实际上充当了 `To`（收件人）的角色**。
+
+要实现群发且彼此不可见，核心就是：**让 `recipients` 为空，把真实用户列表全部放到 `bcc` 里。**
+
+### 修改方案：将用户列表放入 `bcc`
+
+由于 `recipients` 是必填参数，我们可以给它一个占位邮箱（比如发件人自己），然后把真实用户放入 `bcc`。
+
+修改你的 `create_message` 方法如下：
+
+```python
+from fastapi_mail import FastMail, ConnectionConfig, MessageSchema, MessageType, NameEmail
+# ... 其他导入 ...
+
+# 1. 修改 create_message，增加 bcc 参数
+def create_message(
+        bcc_list: list[str],  # 接收真实的群发用户列表
+        subject: str, 
+        body: str, 
+):
+    # 使用一个占位邮箱作为 recipients，防止报错
+    placeholder = ["youmail@xx.com"]
+    
+    message = MessageSchema(
+        recipients=placeholder,   # 必须传入一个列表
+        bcc=bcc_list,             # 把真实的收件人全部放在这里
+        subject=subject,
+        body=body,
+        subtype=MessageType.html
+    )
+    return message
+
+# 2. 修改路由中的调用
+@auth_router.post('/send_mail')
+async def send_mail(emails: EmailSchema):
+    emails_addr = emails.email_address  # 真实用户列表
+    
+    # 将用户列表传给 bcc_list
+    message = create_message(
+        bcc_list=emails_addr, 
+        subject='test mail', 
+        body=mailbody
+    )
+    
+    await mail_server.send_message(message)
+    return {'message': 'success send mail'}
+```
+
+### 效果说明
+
+- **对于真实用户**：他们收到邮件时，**“收件人 (To)” 一栏显示的是“你的发件人邮箱”（即占位邮箱）**，而 `bcc` 里的所有其他真实用户，**他们互相看不到，也看不到发件人自己**。
+- **对于你的发件箱**：你发件箱里看到的收件人也是那个占位邮箱，看不到被 `bcc` 出去的真实用户。
+
+这样既满足了 `recipients` 必填的要求，又完美实现了群发隐私保护。
+
+![](./imgs/demo2.png)
+![](./imgs/demo1.png)
+
+------
+
+
+
+
+## 邮件认证服务
+
+需要准备一个包
+`uv add itsdangerous`
+
+修改utils文件,引入`URLSafeTimedSerializer`(URL安全定时序列化器)，它将帮助我们接收一个字符串，然后将其转换为令牌  
+还可以设置时间，以检查该令牌或数据被签名后经过的时间 
+
+- auth/utils.py
+```python
+serializer = URLSafeTimedSerializer(
+        secret_key=project_settings.SECRET_KEY,
+        salt="emial-configuration" #tips:加盐,可以自己决定，不要太简单，也可以生成一串hash
+    )
+def create_url_safe_token(data:dict):
+    # serializer = URLSafeTimedSerializer(
+    #     secret_key=project_settings.SECRET_KEY,
+    #     salt="emial-configuration" #tips:加盐,可以自己决定，不要太简单，也可以生成一串hash
+    # )
+
+    token = serializer.dumps(data) #tips:没错，它也可以加盐
+    #tips:dumps方法允许我们获取一个值,然后将其序列化为一个对象,或基本上是一个类似于令牌的字符串,就像我们创建的JWT一样
+    return token
+
+def decode_url_safe_token(token:str):
+    try:
+        token_data = serializer.loads(token) #tips:将返回解码后存储在我们令牌内的数据
+
+        return token_data
+    except Exception as e:
+        logger.exception(e)
+```
