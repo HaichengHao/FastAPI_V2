@@ -36,6 +36,9 @@ app = FastAPI(description='书籍管理',
               version=version,
               title='Books API',
               # lifespan=life_span
+              docs_url=f'/api/{version}/docs',
+              redoc_url=f'/api/{version}/redoc',
+              contact={'email': 'hjobs2007@gmail.com'},
               )
 app.include_router(book_router, prefix=f"/api/{version}/books", tags=['books'])
 app.include_router(auth_router, prefix=f"/api/{version}/auth", tags=['auth'])

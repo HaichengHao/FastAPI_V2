@@ -920,7 +920,7 @@ async def get_user_books_submissions(uid:str,
 
 
 ```
-![](/imgs/sbsbooks.svg)
+![](./imgs/sbsbooks.svg)
 
 ---
 
@@ -1039,7 +1039,7 @@ async def get_now_user(user: Annotated[dict, Depends(get_current_user)],
     return user
 
 ```
-![](/imgs/getme.png)
+![](./imgs/getme.png)
 ---
 
 ### 遇到了大坑
@@ -2543,7 +2543,9 @@ async def verify_user_account(token: str, session: Annotated[AsyncSession, Depen
 
 这样就行了!
 
+### 逻辑
 
+![](./imgs/email_verify.svg)
 
 
 
@@ -2629,56 +2631,51 @@ app.add_exception_handler(
 @auth_router.post('/pwd-rest-request')
 async def pwd_rest(email_data: PasswordResetSchema, session: Annotated[AsyncSession, Depends(get_session)],request:Request):
     email = email_data.email
-    # tips:先查一下看看该用户有没有被注册
-    result = await user_service.get_user_by_email(email, session=session)
-    if result:  # TIPS:如果结果不为空，说明用户已经存在了
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
-    else:
-        new_user = await user_service.create_user(email_data, session=session)
 
-        # 生成safetoken
-        token = create_url_safe_token(
-            {
-                'email': email,
+    if email:
+        target_user = await user_service.get_user_by_email(email, session=session)
+        if not target_user:
+            raise UserNotFound()
+        else:
+            # 生成safetoken
+            token = create_url_safe_token(
+                {
+                    'email': email,
+                }
+            )
+            # 改造,引入密码重置认证，对应路由在下方实现
+            link = str(request.url_for('pwd_reset_confirm', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
 
-            }
-        )
-        # ---------
-        # 改造,引入密码重置认证，对应路由在下方实现
-        # link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/pwd_reset_confirm/{token}"
-        link = str(request.url_for('pwd_reset_confirm', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
+            html_msg = f"""
+               <html>
+                   <body>
+                       <h1>重置您的密码</h1>
+                       <p>点此<a href="{link}">链接</a>重置密码</a></p>
+                   </body>
+               </html>
+               """
+            # 构建信息，发送给用户
+            message = create_message(
+                bcc_list=[email],
+                subject="Verify your Email",
+                body=html_msg
 
-        html_msg = f"""
-           <html>
-               <body>
-                   <h1>重置您的密码</h1>
-                   <p>点此<a href="{link}">链接</a>重置密码</a></p>
-               </body>
-           </html>
-           """
-        # 构建信息，发送给用户
-        message = create_message(
-            bcc_list=[email],
-            subject="Verify your Email",
-            body=html_msg
+            )
 
-        )
+            await mail_server.send_message(message)
 
-        await mail_server.send_message(message)
-
-        return JSONResponse(
-            content={
-                "message": "Account created successfully! Check email verify your count",
-                "user": new_user
-            },
-            status_code=status.HTTP_200_OK,
-        )
+            return JSONResponse(
+                content={
+                    "message": "Password reset url have send to your email-box,please check",
+                },
+                status_code=status.HTTP_200_OK,
+            )
 
 
 # 实现密码重置确认的路由
 
 @auth_router.post('/pwd_rest_confirm/{token}')
-async def pwd_reset(token: str, pwd_data: PasswordConfirmSchema,
+async def pwd_reset_confirm(token: str, pwd_data: PasswordConfirmSchema,
                     session: Annotated[AsyncSession, Depends(get_session)]):
     if pwd_data.new_pwd != pwd_data.confirm_new_pwd:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password not match")
@@ -2689,7 +2686,7 @@ async def pwd_reset(token: str, pwd_data: PasswordConfirmSchema,
         if not user:
             raise UserNotFound()
         pwd_hashed = generate_password_hash(pwd_data.confirm_new_pwd)
-        user_service.update_user(user, user_data={'password_hash': pwd_hashed}, session=session)
+        await user_service.update_user(user, user_data={'password_hash': pwd_hashed}, session=session)
         return JSONResponse(
             content={
                 "message": "Password reset successfully",
@@ -2703,4 +2700,464 @@ async def pwd_reset(token: str, pwd_data: PasswordConfirmSchema,
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
     )
 ```
+
+![](./imgs/img_7.png)
+
+![](./imgs/img_6.png)
+
+
+
+使用更新后的密码进行登录
+
+![](./imgs/img_8.png)
+
+
+
+-----
+
+# -------------------
+
+
+
+## Celery,Redis实现后台任务
+
+利用Celery,Redis对于新的邮件发送任务，将其加入到队列当中实现后台任务
+
+### 方式1，使用fastapi自带的BackgroundTasks
+
+> 将# await mail_server.send_message(message)
+> 改造为bg_tasks.add_task(mail_server.send_message,message)
+
+```python
+from fastapi import BackgroundTasks
+
+
+#接下来就是改造原来的需要邮件发送的路由函数
+@auth_router.post('/pwd-rest-request')
+async def pwd_rest(email_data: PasswordResetSchema, session: Annotated[AsyncSession, Depends(get_session)],request:Request,bg_tasks:BackgroundTasks):
+    email = email_data.email
+
+    if email:
+        target_user = await user_service.get_user_by_email(email, session=session)
+        if not target_user:
+            raise UserNotFound()
+        else:
+            # 生成safetoken
+            token = create_url_safe_token(
+                {
+                    'email': email,
+                }
+            )
+            # 改造,引入密码重置认证，对应路由在下方实现
+            link = str(request.url_for('pwd_reset_confirm', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
+
+            html_msg = f"""
+               <html>
+                   <body>
+                       <h1>重置您的密码</h1>
+                       <p>点此<a href="{link}">链接</a>重置密码</a></p>
+                   </body>
+               </html>
+               """
+            # 构建信息，发送给用户
+            message = create_message(
+                bcc_list=[email],
+                subject="Verify your Email",
+                body=html_msg
+
+            )
+
+            # await mail_server.send_message(message)
+            bg_tasks.add_task(mail_server.send_message,message) #important:加入到后台任务❗❗❗❗❗就是这里
+
+            return JSONResponse(
+                content={
+                    "message": "Password reset url have send to your email-box,please check",
+                },
+                status_code=status.HTTP_200_OK,
+            )
+
+
+```
+
+
+
+### 方式2，使用celery
+
+```shell
+uv add celery
+```
+
+![](./imgs/img_9.png)
+
+使用celery我们可以设置代理，可以用redis或者是rabbitMQ
+
+- src/config.py
+
+> 需要设置结果后端以及broker_url
+
+```python
+from celery import Celery
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class MYSettings(BaseSettings):
+    DATABASE_URL: str
+    JWT_SECRET_KEY: str
+    JWT_ALOGRITHM: str
+    REDIS_HOST: str="localhost"
+    REDIS_PORT: int=65522
+    DOMAIN_NAME:str="127.0.0.1:8088"
+    REDIS_URL:str #新增全redis链接方便celery设置
+    model_config = SettingsConfigDict(
+        env_file='.env',
+        extra='ignore'
+    )
+
+
+    #tips:下面是邮件服务所需
+    MAIL_USERNAME:str
+    MAIL_PASSWORD:str
+    MAIL_SERVER:str
+    MAIL_PORT:int
+    MAIL_FROM:str
+    MAIL_STARTTLS:bool
+    MAIL_SSL_TLS:bool
+    MAIL_FROM_NAME:str
+    USE_CREDENTIALS:bool
+    VALIDATE_CERTS:bool
+
+project_settings = MYSettings()
+
+broker_url = project_settings.REDIS_URL  #设置broker_url为redis
+result_backend = project_settings.REDIS_URL  #tips:设置结果后端
+```
+
+- src/db/redis.py
+
+  把原来的token_blocklist改造为Redis.from_url的方式
+
+```python
+'''
+整体思路:
+创建阻塞列表,也就是过期不可用的token对应的JTI
+这样默认的token是有效的，而在redis中存储的是已经失效的在阻塞列表中的token
+
+'''
+from redis.asyncio import Redis
+
+from src.config import project_settings
+
+
+JTI_EXPIRY = 3600
+
+# token_blocklist = Redis(
+#     host=project_settings.REDIS_HOST,
+#     port=project_settings.REDIS_PORT,
+#     db=0,
+#     decode_responses=True,
+# )
+token_blocklist = Redis.from_url(
+    project_settings.REDIS_URL,
+    decode_responses=True,
+)
+
+'''
+我们并不直接把jwttoken存储进redis
+而是存储每条jwt_token对应的jti(JwTId)
+'''
+async def add_jti_to_blocklist(jti: str) -> None:
+    await token_blocklist.set(
+        name=jti,
+        value="",
+        ex=JTI_EXPIRY,
+    )
+
+'''
+    其实就是调用redis设置了一个set,名称为jti,然后过期时间也设置一下'''
+
+async def token_in_blocklist(jti: str) -> bool:
+    token_jti = await token_blocklist.get(jti)
+    '''
+        从redis中查询，看看有没有jti,如果有说明JTI对应的令牌已经失效了'''
+    return token_jti is not None
+
+```
+
+如果要在celery任务中运行异步代码，必须想办法将该异步代码转换，或让它在同步代码中运行
+
+推荐使用`asgiref`
+
+asgiref提供了许多函数包装器,但主要是那些帮助将异步代码转换为能在同步代码上下文中运行的包装器，它还提供一个函数包装器，允许在同步代码上下文中运行同步代码
+
+```shell
+uv add asgiref
+```
+
+- src/celery_tasks
+
+#### 第一个celery任务
+
+> 重点关注原有邮件发送服务的改造，将其功能抽出来做成一个celery任务
+>
+>  async_to_sync(mail_server.send_message)(message)  既异步服务转为同步服务来实现
+
+```python
+from celery import Celery
+from src.mail import create_message,mail_server
+from asgiref.sync import async_to_sync #使用异步转同步函数
+#要创建一个Celery应用，作为celery类的实例
+
+c_app = Celery()
+
+c_app.config_from_object('src.config') #tips:设置celery应用的配置文件的加载位置,我们是在src.config中设置的
+
+
+#创建第一个任务
+
+@c_app.task()
+def send_email(
+        u_bcc_list: list[str],
+        u_subject:str,
+        u_html_msg:str,
+):
+    message = create_message(
+        bcc_list=u_bcc_list, #收件人列表
+        subject=u_subject, #主题
+        body=u_html_msg #邮件消息内容
+
+    )
+
+    #由于send_message是协程，所以需要将其转换为在同步函数中可以运行的代码才行
+    #这时候就需要asgiref的sync方法中的async_to_sync，既异步转同步函数
+    # mail_server.send_message(message)  原来的发送方式不再适用
+
+    async_to_sync(mail_server.send_message)(message)
+```
+
+
+
+- auth/routers.py
+
+改造原来的邮件服务
+
+> 改造为调用send_email.delay()的形式实现同步
+
+```python
+from src.celery_tasks import send_email
+@auth_router.post('/signup', status_code=status.HTTP_201_CREATED)  # 由于做了邮件改造，所以这里不再返回new_user,自然不能用RespSchema了,不然是会报错的
+async def create_user_Account(
+        user_data: UserCreatedSchema,
+        session: Annotated[AsyncSession, Depends(get_session)],
+        request: Request,
+        bg_tasks:BackgroundTasks
+):
+    email = user_data.email
+    # tips:先查一下看看该用户有没有被注册
+    result = await user_service.get_user_by_email(email, session=session)
+    if result:  # TIPS:如果结果不为空，说明用户已经存在了
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
+    else:  # 如果不为空那就开始注册逻辑链
+        # 调用创建服务创建用户
+        new_user = await user_service.create_user(user_data, session=session)
+
+        # 生成safetoken
+        token = create_url_safe_token(
+            {
+                'email': email,
+            }
+        )
+        # ---------
+        # 改造,引入通过电子邮件验证用户账户
+        # link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/verify/{token}"
+        link = str(request.url_for('verify_user_account', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
+        html_msg = f"""
+        <html>
+            <body>
+                <h1>验证你的电子邮件</h1>
+                <p>点此<a href="{link}">链接</a>验证你的邮箱</a></p>
+            </body>
+        </html>
+        """
+ 
+        send_email.delay(
+            u_bcc_list=[email],
+            u_subject="Verify your Email",
+            u_html_msg=html_msg
+
+        )
+
+        return {
+            "message": "Account created successfully! Check email verify your count",
+            "user": new_user
+        }
+
+```
+
+同样的，重置密码的路由也是同样思路进行重新设置,不再赘述
+
+
+
+### 使用Celery
+
+- uvicorn主进程运行后，新开一个终端
+
+```shell
+(FastAPI_V2) PS D:\FastAPI_V2> celery --help
+Usage: celery [OPTIONS] [COMMAND] [ARGS]...
+
+  Celery command entrypoint.
+
+Options:
+  -A, --app TEXT   #这里就是指定Celery应用所在的模块
+  -b, --broker TEXT
+  --result-backend TEXT
+  --loader TEXT
+  --config TEXT
+  --workdir PATH
+  -C, --no-color
+  -q, --quiet
+  --version
+  --skip-checks          Skip Django core checks on startup. Setting the
+                         SKIP_CHECKS environment variable to any non-empty
+                         string will have the same effect.
+  --help                 Show this message and exit.
+
+Commands:
+  amqp     AMQP Administration Shell.
+  beat     Start the beat periodic task scheduler.
+  call     Call a task by name.
+  control  Send the COMMAND control command to the workers.
+  events   Event-stream utilities.
+  graph    The ``celery graph`` command.
+  inspect  Inspect the workers by sending them the COMMAND inspect command.
+  list     Get info from broker.
+  logtool  The ``celery logtool`` command.
+  migrate  Migrate tasks from one broker to another.
+  multi    Start multiple worker instances.
+  purge    Erase all messages from all known task queues.
+  report   Shows information useful to include in bug-reports.
+  result   Print the return value for a given task id.
+  shell    Start shell session with convenient access to celery symbols.
+  status   Show list of workers that are online.
+  upgrade  Perform upgrade between versions.
+  worker   Start worker instance.
+```
+
+
+
+- 指定celeryapp,由于我写的在src下的celery_tasks.py里实现的c_app,所以就指定这里就行，如果直接命名就是app,那写路径写成`src.celery_tasks` 就行，且我们需要启动工作者实例,那么后面加上worker
+
+```shell
+(FastAPI_V2) PS D:\FastAPI_V2> celery -A src.celery_tasks.c_app worker
+```
+
+### 但是！！！大坑，由于我当前开发在win,不是在我的ubuntu，并且celery官方明确说主要支持linux，所以需要换命令
+
+主要解决方法的详细部分已经写到celery坑点.md了
+
+现在换一下命令
+
+```shel
+celery -A src.celery_tasks.c_app worker --loglevel=info --pool=solo
+```
+
+```shell
+(FastAPI_V2) PS D:\FastAPI_V2> celery -A src.celery_tasks.c_app worker --loglevel=info --pool=solo
+ 
+ -------------- celery@aya v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Windows-11-10.0.26200-SP0 2026-11-03 11:11:47
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         __main__:0x29876ad9fd0
+- ** ---------- .> transport:   redis://127.0.0.1:65522/0
+- ** ---------- .> results:     redis://127.0.0.1:65522/0
+- *** --- * --- .> concurrency: 18 (solo)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . src.celery_tasks.send_email
+
+[2026-11-03 11:11:47,442: INFO/MainProcess] Connected to redis://127.0.0.1:65522/0
+[2026-11-03 11:11:47,450: INFO/MainProcess] mingle: searching for neighbors
+[2026-11-03 11:11:48,490: INFO/MainProcess] mingle: all alone
+[2026-11-03 11:11:48,531: INFO/MainProcess] celery@aya ready.
+```
+
+### 安装celery 图形界面，flower  
+
+```shell
+uv add flower
+```
+
+- 运行结果后端可视化flower,注意，要有正在运行的worker才能监控
+
+```shell
+(FastAPI_V2) PS D:\FastAPI_V2> celery -A src.celery_tasks.c_app flower
+2026-11-03 11:39:28.815 | INFO     | logging:callHandlers:1762 - Visit me at http://127.0.0.1:5555
+2026-11-03 11:39:28.844 | INFO     | logging:callHandlers:1762 - Broker: redis://127.0.0.1:65522/0
+2026-11-03 11:39:28.847 | INFO     | logging:callHandlers:1762 - Registered tasks: 
+['celery.accumulate',
+ 'celery.backend_cleanup',
+ 'celery.chain',
+ 'celery.chord',
+ 'celery.chord_unlock',
+ 'celery.chunks',
+ 'celery.group',
+ 'celery.map',
+ 'celery.starmap',
+ 'src.celery_tasks.send_email']
+2026-11-03 11:39:28.866 | INFO     | logging:callHandlers:1762 - Connected to redis://127.0.0.1:65522/0
+```
+
+
+
+![](./imgs/img_10.png)
+
+
+
+这时候可以把之前测试邮件发送的服务也改造成celery task
+
+```python
+# tips:定义邮件发送路由
+@auth_router.post('/send_mail')
+async def send_mail(emails: EmailSchema):
+    emails_addr = emails.email_address
+    mailbody = """
+    <html>略
+    </html>
+    """
+
+    # message = create_message(bcc_list=emails_addr, subject='test mail', body=mailbody)
+    # await mail_server.send_message(message)
+
+    #这里也改造
+
+    send_email.delay(
+        u_bcc_list=emails_addr,
+        u_subject="Test_send",
+        u_html_msg=mailbody
+    )
+    return {
+        'message': 'success send mail',
+    }
+
+```
+
+值得注意的是,由于u_bcc_list接收的是邮件列表，是list[str]形式的，我最开始搞混了，因为这个测试路由的EmailSchema中的email_address已经是list[str]格式了,所以我最开始写了u_bcc_list=[emails_addr]完全就是错的,是[ ['xxx@qq.com','xxx@163.com'] ]  
+这样是错误的,所以去掉外层括号就好了  
+
+再次构造发送邮件请求后成功
+
+![](./imgs/img_12.png)
+
+![](./imgs/img_11.png)
+
+**这里的坑是非常值得注意的，因为会遇到路由没报错但是celery_app报错，因为现在邮件发送的任务已经交给celery task了，所以 
+路由触发了就会成功，但是实际邮件到底有没有发送出去还是得看celery task**
 

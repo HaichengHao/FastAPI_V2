@@ -11,10 +11,14 @@ from src.config import project_settings
 
 JTI_EXPIRY = 3600
 
-token_blocklist = Redis(
-    host=project_settings.REDIS_HOST,
-    port=project_settings.REDIS_PORT,
-    db=0,
+# token_blocklist = Redis(
+#     host=project_settings.REDIS_HOST,
+#     port=project_settings.REDIS_PORT,
+#     db=0,
+#     decode_responses=True,
+# )
+token_blocklist = Redis.from_url(
+    project_settings.REDIS_URL,
     decode_responses=True,
 )
 

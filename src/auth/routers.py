@@ -1,6 +1,6 @@
 from datetime import datetime
 from src.errors import InvalidToken, UserNotFound
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status,BackgroundTasks
 from typing import Annotated
 from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.responses import JSONResponse
@@ -16,6 +16,7 @@ from src.errors import InvalidCredentials
 from src.config import project_settings
 from src.auth.utils import generate_password_hash
 from fastapi import Request
+from src.celery_tasks import send_email
 auth_router = APIRouter(
     tags=['auth']
 )
@@ -99,8 +100,16 @@ async def send_mail(emails: EmailSchema):
     </html>
     """
 
-    message = create_message(bcc_list=emails_addr, subject='test mail', body=mailbody)
-    await mail_server.send_message(message)
+    # message = create_message(bcc_list=emails_addr, subject='test mail', body=mailbody)
+    # await mail_server.send_message(message)
+
+    #这里也改造
+
+    send_email.delay(
+        u_bcc_list=emails_addr,
+        u_subject="Test send",
+        u_html_msg=mailbody
+    )
     return {
         'message': 'success send mail',
     }
@@ -113,6 +122,7 @@ async def create_user_Account(
         user_data: UserCreatedSchema,
         session: Annotated[AsyncSession, Depends(get_session)],
         request: Request,
+        bg_tasks:BackgroundTasks
 ):
     email = user_data.email
     # tips:先查一下看看该用户有没有被注册
@@ -143,14 +153,27 @@ async def create_user_Account(
         </html>
         """
         # 构建信息，发送给用户
-        message = create_message(
-            bcc_list=[email],
-            subject="Verify your Email",
-            body=html_msg
+        # message = create_message(
+        #     bcc_list=[email],
+        #     subject="Verify your Email",
+        #     body=html_msg
+        #
+        # )
+
+        # await mail_server.send_message(message)
+        # bg_tasks.add_task(mail_server.send_message,message)  #important:使用后台管理,将邮件发送添加到后台任务重
+        """
+        def add_task(self,
+             func: (**P) -> Any, 第一个参数传入的是一个函数
+             *args: **P,   第二个以及第三个传入的参数是函数所需的位置参数和关键字参数
+             **kwargs: **P) -> None
+        """
+        send_email.delay(
+            u_bcc_list=[email],
+            u_subject="Verify your Email",
+            u_html_msg=html_msg
 
         )
-
-        await mail_server.send_message(message)
 
         return {
             "message": "Account created successfully! Check email verify your count",
@@ -253,58 +276,60 @@ async def revoke_token(token_details: Annotated[dict, Depends(access_token_beare
 
 
 @auth_router.post('/pwd-rest-request')
-async def pwd_rest(email_data: PasswordResetSchema, session: Annotated[AsyncSession, Depends(get_session)],request:Request):
+async def pwd_rest(email_data: PasswordResetSchema, session: Annotated[AsyncSession, Depends(get_session)],request:Request,bg_tasks:BackgroundTasks):
     email = email_data.email
-    # tips:先查一下看看该用户有没有被注册
-    result = await user_service.get_user_by_email(email, session=session)
-    if result:  # TIPS:如果结果不为空，说明用户已经存在了
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email already registered")
-    else:
-        new_user = await user_service.create_user(email_data, session=session)
 
-        # 生成safetoken
-        token = create_url_safe_token(
-            {
-                'email': email,
+    if email:
+        target_user = await user_service.get_user_by_email(email, session=session)
+        if not target_user:
+            raise UserNotFound()
+        else:
+            # 生成safetoken
+            token = create_url_safe_token(
+                {
+                    'email': email,
+                }
+            )
+            # 改造,引入密码重置认证，对应路由在下方实现
+            link = str(request.url_for('pwd_reset_confirm', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
 
-            }
-        )
-        # ---------
-        # 改造,引入密码重置认证，对应路由在下方实现
-        # link = f"http://{project_settings.DOMAIN_NAME}/api/v1/auth/pwd_reset_confirm/{token}"
-        link = str(request.url_for('pwd_reset_confirm', token=token)) #被静态硬编码坑惨了，所以换动态的，不然老验证不过去
+            html_msg = f"""
+               <html>
+                   <body>
+                       <h1>重置您的密码</h1>
+                       <p>点此<a href="{link}">链接</a>重置密码</a></p>
+                   </body>
+               </html>
+               """
+            # 构建信息，发送给用户
+            # message = create_message(
+            #     bcc_list=[email],
+            #     subject="Verify your Email",
+            #     body=html_msg
+            #
+            # )
+            #
+            # # await mail_server.send_message(message)
+            # bg_tasks.add_task(mail_server.send_message,message) #important:加入到后台任务
 
-        html_msg = f"""
-           <html>
-               <body>
-                   <h1>重置您的密码</h1>
-                   <p>点此<a href="{link}">链接</a>重置密码</a></p>
-               </body>
-           </html>
-           """
-        # 构建信息，发送给用户
-        message = create_message(
-            bcc_list=[email],
-            subject="Verify your Email",
-            body=html_msg
+            send_email.delay(
+                u_bcc_list=[email],
+                u_subject="Reset Your Password",
+                u_html_msg=html_msg
+            )
 
-        )
-
-        await mail_server.send_message(message)
-
-        return JSONResponse(
-            content={
-                "message": "Account created successfully! Check email verify your count",
-                "user": new_user
-            },
-            status_code=status.HTTP_200_OK,
-        )
+            return JSONResponse(
+                content={
+                    "message": "Password reset url have send to your email-box,please check",
+                },
+                status_code=status.HTTP_200_OK,
+            )
 
 
 # 实现密码重置确认的路由
 
 @auth_router.post('/pwd_rest_confirm/{token}')
-async def pwd_reset(token: str, pwd_data: PasswordConfirmSchema,
+async def pwd_reset_confirm(token: str, pwd_data: PasswordConfirmSchema,
                     session: Annotated[AsyncSession, Depends(get_session)]):
     if pwd_data.new_pwd != pwd_data.confirm_new_pwd:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password not match")
@@ -315,7 +340,7 @@ async def pwd_reset(token: str, pwd_data: PasswordConfirmSchema,
         if not user:
             raise UserNotFound()
         pwd_hashed = generate_password_hash(pwd_data.confirm_new_pwd)
-        user_service.update_user(user, user_data={'password_hash': pwd_hashed}, session=session)
+        await user_service.update_user(user, user_data={'password_hash': pwd_hashed}, session=session)
         return JSONResponse(
             content={
                 "message": "Password reset successfully",

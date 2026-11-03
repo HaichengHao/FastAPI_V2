@@ -5,7 +5,7 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
 from starlette import status
 
-from src.auth.utils import generate_password_hash,verify_password
+from src.auth.utils import generate_password_hash, verify_password, passwd_context
 from src.auth.model import User
 from src.auth.schemas import UserSchema, UserLoginSchema
 from sqlmodel import desc, select
@@ -98,6 +98,10 @@ class UserService:
         user = await self.get_user_by_email(email, session)
         if user:
             password_valid=verify_password(plain_password=password,hashed_password=user.password_hash)
+            print("用户是否存在:", user is not None)
+            print("密码哈希算法:", passwd_context.identify(user.password_hash))
+            print("密码验证结果:", password_valid)
+            print("邮箱是否验证:", user.is_verified)
             #tips:如果用户存在,那就进行密码的校验
             if password_valid: #tips:数据库查验通过则进行下一步操作
                 #tips:如果用户存在，那么就进入下一步jwt操作,为该用户创建访问令牌和刷新令牌
