@@ -15,6 +15,9 @@ from src.auth.utils import create_access_token,decode_token
 
 
 class UserService:
+    async def user_exists(self,email,session:Annotated[AsyncSession,Depends(get_session)]):
+        user = await self.get_user_by_email(email, session)
+        return True if user is not None else False
     async def create_user(self, user_data: UserSchema, session: Annotated[AsyncSession, Depends(get_session)]):
         user_exist = await self.get_user_by_email(user_data.email, session)
         if user_exist:

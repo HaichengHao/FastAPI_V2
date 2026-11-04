@@ -2368,6 +2368,8 @@ async def send_mail(emails: EmailSchema):
 
 ------
 
+# -------------------
+
 
 
 
@@ -3121,7 +3123,7 @@ uv add flower
 
 
 
-这时候可以把之前测试邮件发送的服务也改造成celery task
+- 这时候可以把之前测试邮件发送的服务也改造成celery task
 
 ```python
 # tips:定义邮件发送路由
